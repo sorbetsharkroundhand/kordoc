@@ -422,5 +422,10 @@ export type {
   OcrProvider, WatchOptions,
 } from "./types.js"
 export { blocksToMarkdown } from "./table/builder.js"
+export { extractTableSignals, classifyTable, classifyTableBlocks } from "./table/classifier.js"
+export type {
+  TableClassificationKind, TableClassificationReason,
+  TableSignals, TableClassification, TableClassificationContext,
+} from "./table/classifier.js"
 export { blocksToPages } from "./page-markdown.js"
 export { VERSION } from "./utils.js"
