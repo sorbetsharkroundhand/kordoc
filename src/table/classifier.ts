@@ -35,7 +35,7 @@ export type TableClassificationKind =
 export type TableClassificationReason =
   /** 활성 행의 열 위치·셀 수가 반복됨 */
   | "repeated-row-schema"
-  /** 행마다 동일한 열 경계(앵커 수)가 반복됨 */
+  /** 행마다 동일한 셀 경계가 반복됨 */
   | "grid-regularity"
   /** 활성 행/열 비율이 높음 */
   | "high-active-density"
@@ -75,7 +75,7 @@ export interface TableSignals {
   activeRowRatio: number
   activeColCount: number
   activeColRatio: number
-  /** 행마다 동일한 앵커 수(열 경계) 반복 정도 (0-1, 최빈값 점유율) */
+  /** 행마다 동일한 셀 시작·끝 경계 반복 정도 (0-1, 최빈값 점유율) */
   gridRegularity: number
   /** 활성 행 시그니처(앵커 시작 열 나열)의 최대 그룹 점유율 (0-1) */
   rowSchemaConsistency: number
@@ -187,19 +187,15 @@ function collectAnchors(table: IRTable): TableAnchor[] {
   return anchors
 }
 
-/** 최빈값 점유율 — 동률은 더 작은 값을 최빈으로 (결정성) */
-function modalShare(values: number[]): number {
+/** 최빈값 점유율 */
+function modalShare<T>(values: T[]): number {
   if (values.length === 0) return 0
-  const freq = new Map<number, number>()
-  let bestValue = values[0]
+  const freq = new Map<T, number>()
   let bestCount = 0
   for (const v of values) {
     const n = (freq.get(v) ?? 0) + 1
     freq.set(v, n)
-    if (n > bestCount || (n === bestCount && v < bestValue)) {
-      bestValue = v
-      bestCount = n
-    }
+    if (n > bestCount) bestCount = n
   }
   return bestCount / values.length
 }
@@ -239,7 +235,9 @@ function contextKeywordStrength(texts: string[] | undefined): number {
   for (let i = 0; i < limit; i++) {
     const text = texts[i]
     if (!text) continue
-    if (DIAGRAM_CONTEXT_WORDS.some(w => text.includes(w))) {
+    // 한글 문서의 균등배분("비 상 연 락 망")도 같은 문맥어로 취급한다.
+    const normalizedText = text.replace(/\s+/g, "")
+    if (DIAGRAM_CONTEXT_WORDS.some(w => normalizedText.includes(w.replace(/\s+/g, "")))) {
       strength = Math.max(strength, CONTEXT_DECAY[i])
     }
   }
@@ -279,14 +277,19 @@ export function extractTableSignals(table: IRTable): TableSignals {
   const filledAnchorCount = filledAnchors.length
   const mergedAnchors = anchors.filter(a => a.colSpan > 1 || a.rowSpan > 1)
 
-  // 행별 집계 — 앵커 수(열 경계 규칙성)와 활성 행 시그니처
+  // 행별 집계 — 셀 시작·끝 경계 규칙성과 활성 행 시그니처
   const rowCountPerRow: number[] = []
+  const rowBoundaries: Array<Array<[start: number, end: number]>> =
+    Array.from({ length: rows }, () => [])
   const activeSignatures: string[] = []
   const activeRowsSet = new Set<number>()
   const activeColsSet = new Set<number>()
   const rowStart = new Map<number, TableAnchor[]>()
   for (const a of anchors) {
     rowCountPerRow[a.row] = (rowCountPerRow[a.row] ?? 0) + 1
+    for (let r = a.row; r < Math.min(rows, a.row + a.rowSpan); r++) {
+      rowBoundaries[r].push([a.col, a.col + a.colSpan])
+    }
     let list = rowStart.get(a.row)
     if (!list) {
       list = []
@@ -307,6 +310,10 @@ export function extractTableSignals(table: IRTable): TableSignals {
 
   const activeRowCount = activeRowsSet.size
   const activeColCount = activeColsSet.size
+  const rowBoundarySignatures = rowBoundaries.map(boundaries => boundaries
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    .map(([start, end]) => `${start}:${end}`)
+    .join(","))
 
   // 행 스키마 일관성 — 활성 행들의 시작 열 나열 최대 그룹 점유율
   let rowSchemaConsistency = 0
@@ -379,7 +386,7 @@ export function extractTableSignals(table: IRTable): TableSignals {
     activeRowRatio: round3(rows > 0 ? activeRowCount / rows : 0),
     activeColCount,
     activeColRatio: round3(cols > 0 ? activeColCount / cols : 0),
-    gridRegularity: round3(modalShare(rowCountPerRow)),
+    gridRegularity: round3(modalShare(rowBoundarySignatures)),
     rowSchemaConsistency: round3(rowSchemaConsistency),
     spanIrregularity: round3(spanIrregularity),
     mergedAnchorCount: mergedAnchors.length,
@@ -407,8 +414,11 @@ interface ScoreComponents {
 }
 
 function scoreComponents(signals: TableSignals, context?: TableClassificationContext): ScoreComponents {
-  // 활성 행 수가 적으면 스키마 일관성 자체가 신뢰를 잃는다 (1행 = 우연 가능)
-  const schemaReliability = clamp01(signals.activeRowCount / 4)
+  // 1×1은 행·열 관계가 없어 스키마 근거로 쓸 수 없다. 그보다 큰 빈 입력
+  // 양식은 활성 행이 하나여도 전체 격자 규칙성과 함께 약한 근거로 보존한다.
+  const schemaReliability = signals.rows === 1 && signals.cols === 1
+    ? 0
+    : clamp01(signals.activeRowCount / 4)
 
   // 단일 열 표에서 활성 열 비율은 자명히 1이라 정보가 없다 — 행 비율만 본다
   const activeDensity = signals.cols > 1

@@ -76,6 +76,21 @@ describe("extractTableSignals", () => {
     assert.equal(s.mergedAnchorCount, 1)
     assert.ok(s.mergedCellRatio > 0 && s.mergedCellRatio < 1)
   })
+
+  it("앵커 수가 같아도 열 경계가 다르면 완전한 규칙 격자가 아니다", () => {
+    const table = buildTable([
+      [
+        { text: "상단 A", colSpan: 2, rowSpan: 1 },
+        { text: "상단 B", colSpan: 2, rowSpan: 1 },
+      ],
+      [
+        { text: "하단 A", colSpan: 1, rowSpan: 1 },
+        { text: "하단 B", colSpan: 3, rowSpan: 1 },
+      ],
+    ])
+
+    assert.equal(extractTableSignals(table).gridRegularity, 0.5)
+  })
 })
 
 // ─── 판별 사례 ────────────────────────────────────────
@@ -204,6 +219,14 @@ describe("classifyTable", () => {
     assert.equal(classifyTable(tinyWide).kind, "uncertain")
   })
 
+  it("내용이 있는 일반 1×1 표도 행·열 관계가 없어 uncertain", () => {
+    const table = buildTable(plain([["메모"]]))
+    const result = classifyTable(table)
+
+    assert.equal(result.kind, "uncertain")
+    assert.deepEqual(result.reasons, ["low-evidence"])
+  })
+
   it("8. 문맥 키워드만 있고 구조적 근거가 없는 표 → 비표 확정 금지", () => {
     const cleanData = buildTable(plain([
       ["구분", "인원", "비고"],
@@ -220,6 +243,19 @@ describe("classifyTable", () => {
       !result.reasons.includes("diagram-context-keyword"),
       "구조 근거 없이 문맥 근거만 남으면 안 된다",
     )
+  })
+
+  it("한글 균등배분 공백이 있는 도식 문맥어도 인식한다", () => {
+    const table = scatterBoxes(12, 18, [
+      [0, 7, 2, 4, "기관장"],
+      [3, 1, 2, 3, "운영지원과"],
+      [3, 13, 2, 3, "정책기획단"],
+      [8, 5, 1, 4, "당직실"],
+    ])
+    const result = classifyTable(table, { precedingText: ["비 상 연 락 망"] })
+
+    assert.equal(result.kind, "non-tabular-layout")
+    assert.ok(result.reasons.includes("diagram-context-keyword"))
   })
 
   it("9. 입력 객체를 변경하지 않는다 (순수 함수)", () => {
@@ -260,6 +296,27 @@ describe("classifyTable", () => {
     for (const b of tables) {
       const result = classifyTable(b.table)
       assert.notEqual(result.kind, "non-tabular-layout", `일반 표가 비표로 오판: ${JSON.stringify(result.signals)}`)
+    }
+  })
+
+  it("음성 대조군 — 실제 XLS 표 픽스처는 모두 semantic-table", async () => {
+    const files = ["minutes.xls", "budget.xls", "population.xls", "facilities.xls", "roster.xls"]
+
+    for (const file of files) {
+      const parsed = await parse(readFileSync(resolve(FIXTURES_DIR, "xls", file)))
+      assert.ok(parsed.success, `${file} 파싱 실패`)
+      const tables = parsed.blocks.filter(
+        (b): b is IRBlock & { table: IRTable } => b.type === "table" && !!b.table,
+      )
+      assert.ok(tables.length >= 1, `${file}에서 표를 찾지 못함`)
+      for (const [index, block] of tables.entries()) {
+        const result = classifyTable(block.table)
+        assert.equal(
+          result.kind,
+          "semantic-table",
+          `${file} table ${index}: ${JSON.stringify(result)}`,
+        )
+      }
     }
   })
 
